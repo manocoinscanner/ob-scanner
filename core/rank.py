@@ -1,4 +1,4 @@
-"""Ranking scanner: scores every coin 0-100 (trend, strength, volume, momentum vs BTC, setup).
+"""Ranking scanner: scores every coin (trend, strength, volume, momentum vs BTC, setup, derivatives).
 No hard filters, so it always returns a list."""
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .data import candles, funding_rates, make_ex, universe
+
 
 def ema(s, n):
     return s.ewm(span=n, adjust=False).mean()
@@ -80,7 +81,33 @@ def score_coin(h1, h4, btc_roc):
             "why": ", ".join(f"{k} {v:g}" for k, v in pts.items() if v)}
 
 
-def run_rank(exch, min_vol_m=20, top_n=100, on_progress=None):
+def oi_change(ex, sym):
+    """(OI change over 24h %, over 4h %) from hourly open-interest history. (nan, nan) if unavailable."""
+    try:
+        h = ex.fetch_open_interest_history(sym, "1h", limit=30)
+        vals = [x.get("openInterestValue") or x.get("openInterestAmount") for x in h]
+        vals = [float(v) for v in vals if v]
+        if len(vals) < 25:
+            return np.nan, np.nan
+        return (vals[-1] / vals[-25] - 1) * 100, (vals[-1] / vals[-5] - 1) * 100
+    except Exception:
+        return np.nan, np.nan
+
+
+def derivs_bonus(r):
+    """Up to +15: OI rising with the move (+10) and funding not crowded against the trade (+5)."""
+    long_ = r["dir"] == "LONG"
+    pts = 0.0
+    oi, price_chg = r.get("oi24"), r["chg24"]
+    if oi == oi and oi is not None and oi > 0 and ((long_ and price_chg > 0) or (not long_ and price_chg < 0)):
+        pts += 10
+    f = r.get("funding")
+    if f == f and f is not None and ((long_ and f <= 0.00005) or (not long_ and f >= 0.0001)):
+        pts += 5
+    return pts
+
+
+def run_rank(exch, min_vol_m=20, top_n=100, on_progress=None, deriv_top=40):
     ex = make_ex(exch)
     uni = universe(ex, min_vol_m * 1_000_000)[:top_n]
     btc_sym = "BTCUSDT" if exch == "binancespot" else "BTC/USDT:USDT"
@@ -88,10 +115,11 @@ def run_rank(exch, min_vol_m=20, top_n=100, on_progress=None):
 
     def one(sym, base):
         r = score_coin(candles(ex, sym, "1h", 200), candles(ex, sym, "4h", 200), btc)
-        return None if r is None else {"coin": base, **r}
+        return None if r is None else {"coin": base, "sym": sym, **r}
 
     rows, fails = [], 0
-    with ThreadPoolExecutor(max_workers=8 if exch == "binancespot" else 4) as pool:
+    workers = 8 if exch == "binancespot" else 4
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = [pool.submit(one, s, b) for _, s, b in uni]
         for i, f in enumerate(as_completed(futs)):
             try:
@@ -101,9 +129,27 @@ def run_rank(exch, min_vol_m=20, top_n=100, on_progress=None):
             except Exception:
                 fails += 1
             if on_progress:
-                on_progress((i + 1) / len(futs))
+                on_progress((i + 1) / len(futs) * (0.8 if exch != "binancespot" else 1.0))
     df = pd.DataFrame(rows)
-    if not df.empty:
+    if df.empty:
+        return df, {"n": len(uni), "fails": fails, "btc_roc": btc, "derivs": False,
+                    "time": pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M")}
+    df = df.sort_values("score", ascending=False).reset_index(drop=True)
+    df["oi24"], df["oi4"], df["funding"], df["bonus"] = np.nan, np.nan, np.nan, 0.0
+    derivs = False
+    if exch != "binancespot":  # open interest + funding exist only for perpetuals
+        fr = funding_rates(ex)
+        top = df.head(deriv_top)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            res = list(pool.map(lambda s: oi_change(ex, s), top["sym"]))
+        for (idx, _), (o24, o4) in zip(top.iterrows(), res):
+            df.at[idx, "oi24"], df.at[idx, "oi4"] = o24, o4
+        df["funding"] = df["sym"].map(fr).astype(float)
+        derivs = bool(df["oi24"].notna().any() or df["funding"].notna().any())
+        df["bonus"] = [derivs_bonus(r) for r in df.to_dict("records")]
+        df["score"] = (df["score"] + df["bonus"]).round(1)
         df = df.sort_values("score", ascending=False).reset_index(drop=True)
-    return df, {"n": len(uni), "fails": fails, "btc_roc": btc,
+        if on_progress:
+            on_progress(1.0)
+    return df, {"n": len(uni), "fails": fails, "btc_roc": btc, "derivs": derivs,
                 "time": pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M")}
