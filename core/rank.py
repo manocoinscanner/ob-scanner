@@ -7,8 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 
-from .data import candles, make_ex, universe
-
+from .data import candles, funding_rates, make_ex, universe
 
 def ema(s, n):
     return s.ewm(span=n, adjust=False).mean()
