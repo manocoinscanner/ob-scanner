@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -26,6 +27,11 @@ if st.button("🔍 Scan now", type="primary"):
 res = st.session_state.get("rank")
 if res:
     df, meta = res
+    df = df.copy()
+    # පරණ scan ප්‍රතිඵලයක columns නැති වුණත් නොකැඩෙන්න
+    for col, default in (("oi24", np.nan), ("oi4", np.nan), ("funding", np.nan), ("bonus", 0.0), ("sym", "")):
+        if col not in df.columns:
+            df[col] = default
     st.caption(f"{meta['n']} coins scanned at {meta['time']} UTC | BTC 24h {meta['btc_roc']:+.2f}% | failed {meta['fails']}")
     if df.empty:
         st.warning("දත්ත ලැබුණේ නැහැ. වෙනත් Data source එකක් තෝරන්න.")
@@ -46,8 +52,8 @@ if res:
             "Setup": d["setup"], "Price": d["price"].map(fmt), "24h %": d["chg24"].round(2),
             "vs BTC %": d["vs_btc"].round(2), "RVOL": d["rvol"].round(1), "RSI 1H": d["rsi"].round(0),
             "Trend ER": d["er"].round(2),
-            "OI 24h %": d["oi24"].round(1), "OI 4h %": d["oi4"].round(1),
-            "Funding %": (d["funding"] * 100).round(4), "Derivs +": d["bonus"],
+            "OI 24h %": d["oi24"].astype(float).round(1), "OI 4h %": d["oi4"].astype(float).round(1),
+            "Funding %": (d["funding"].astype(float) * 100).round(4), "Derivs +": d["bonus"],
             "Entry": d["entry"].map(fmt), "Stop": d["stop"].map(fmt),
             "TP1 (1.5R)": d["tp1"].map(fmt), "TP2 (3R)": d["tp2"].map(fmt), "ලකුණු බෙදීම": d["why"],
         })
