@@ -10,7 +10,7 @@ from core.rank import run_rank
 
 st.set_page_config(page_title="Coin Ranker", page_icon="🏆", layout="wide")
 st.title("🏆 Coin Ranker")
-st.caption("පළමුව DOM (order book) සහ order flow දෙකෙන්ම confirm වුණ coins විතරක් තෝරලා, ඊට පස්සේ technical analysis බලනවා.")
+st.caption("Premium/Discount + DOM (order book) + order flow confirm වුණ coins විතරක් තෝරලා, ඊට පස්සේ technical analysis බලනවා.")
 
 c1, c2, c3, c4 = st.columns(4)
 exch_name = c1.selectbox("Data source", list(SOURCES)[::-1])
@@ -36,7 +36,7 @@ if res:
                          ("dom_share", np.nan), ("bid_wall_x", np.nan), ("bid_wall_dist", np.nan),
                          ("ask_wall_x", np.nan), ("ask_wall_dist", np.nan), ("blocks", False), ("dom", 0.0),
                          ("cover", np.nan), ("flow_share", np.nan), ("flow_win", np.nan), ("flow", 0.0),
-                         ("persist", np.nan)):
+                         ("persist", np.nan), ("pd_pos", np.nan), ("pd_zone", ""), ("pd_ok", True)):
         if col not in df.columns:
             df[col] = default
     st.caption(f"{meta['n']} coins scanned at {meta['time']} UTC | BTC 24h {meta['btc_roc']:+.2f}% | failed {meta['fails']}")
@@ -46,8 +46,10 @@ if res:
         # technical score = total score without the DOM / Flow / Derivs parts (max 100)
         df["tech"] = (df["score"] - df["bonus"].astype(float) - df["dom"].astype(float) - df["flow"].astype(float)).round(1)
 
-        st.markdown("### 🔒 Confirm නීති (පළමුව DOM + Flow, ඊට පස්සේ Technical)")
-        r1, r2, r3 = st.columns(3)
+        st.markdown("### 🔒 Confirm නීති (Premium/Discount + DOM + Flow, ඊට පස්සේ Technical)")
+        r0, r1, r2, r3 = st.columns(4)
+        need_pd = r0.checkbox("Premium/Discount අනිවාර්යයි", True,
+                              help="Long = මිල range එකේ Discount (පහළ භාගය) තුළ. Short = Premium (ඉහළ භාගය) තුළ. Range = අන්තිම 4H candles 100.")
         need_dom = r1.checkbox("DOM (order book) confirm අනිවාර්යයි", True,
                                help="Order book data ලැබෙන්න ඕන, DOM ලකුණු ධනාත්මක, TP1 ට හරහට wall නැහැ, support wall එක අතුරුදහන් වෙලා නැහැ.")
         need_flow = r2.checkbox("Order flow (taker flow) confirm අනිවාර්යයි", True,
@@ -62,6 +64,9 @@ if res:
         if side != "All":
             work = work[work["dir"] == side]
             funnel.append((f"Direction = {side}", len(work)))
+        if need_pd:
+            work = work[work["pd_ok"].astype(bool)]
+            funnel.append(("Premium/Discount හරි (Long=Discount, Short=Premium) ✅", len(work)))
         if need_dom:
             work = work[(work["dom_share"].astype(float).notna()) & (work["dom"].astype(float) > 0)
                         & (~work["blocks"].astype(bool)) & (work["persist"].astype(float).fillna(1.0) != 0.0)]
@@ -91,9 +96,11 @@ if res:
         else:
             fmt = lambda x: f"{x:.6g}"
             persist_txt = d["persist"].astype(float).map(lambda x: "" if x != x else ("✅ yes" if x == 1 else "⚠️ vanished (spoof?)"))
+            pd_txt = [("" if p != p else f"{z} {p:.0f}%" + (" ✅" if ok else " ⚠️ වැරදි පැත්ත"))
+                      for z, p, ok in zip(d["pd_zone"], d["pd_pos"].astype(float), d["pd_ok"].astype(bool))]
             table = pd.DataFrame({
                 "#": range(1, len(d) + 1), "Coin": d["coin"],
-                "Dir": d["dir"].map({"LONG": "🟢 LONG", "SHORT": "🔴 SHORT"}), "Score": d["score"],
+                "Dir": d["dir"].map({"LONG": "🟢 LONG", "SHORT": "🔴 SHORT"}), "P/D zone": pd_txt, "Score": d["score"],
                 "Tech (100)": d["tech"], "Setup": d["setup"], "Price": d["price"].map(fmt), "24h %": d["chg24"].round(2),
                 "vs BTC %": d["vs_btc"].round(2), "RVOL": d["rvol"].round(1), "RSI 1H": d["rsi"].round(0),
                 "Trend ER": d["er"].round(2),
@@ -115,6 +122,7 @@ if res:
 
         st.markdown("""
 **ලකුණු (උපරිමය 135)**: 4H trend 25 + 1H trend 10 + පිරිසිදු trend 15 + Volume 15 + BTC ට වඩා ශක්තිමත් 10 + Setup 25 (Breakout හෝ Pullback) + Derivs 15 + DOM 10 + Flow 5. **Tech (100)** = Derivs, DOM, Flow අයින් කළාම ඉතුරු ලකුණු.
+**Premium/Discount**: අන්තිම 4H candles 100ක ඉහළම/පහළම මිල අතර range එකේ, මිල 50%ට පහළ නම් **Discount** (Long entry වලට හරි), 50%ට ඉහළ නම් **Premium** (Short entry වලට හරි). මේක ලකුණු වලට එකතු වෙන්නේ නැහැ, අනිවාර්ය නීතියක් (ටික් කරලා අයින් කරන්න පුළුවන්).
 **DOM confirm**: Order book data ලැබිලා, ඔයාගේ දිශාවට support wall එකක් (මිලට 2% ඇතුළත) හෝ bid/ask බර තියෙන්න ඕන; TP1 ට හරහට විරුද්ධ wall එකක් නොතියෙන්න ඕන; support wall එක දෙවෙනි snapshot එකේ අතුරුදහන් වෙලා නොතියෙන්න ඕන.
 **Order flow confirm**: Taker flow data ලැබිලා, Long එකකට buyers ≥55% හෝ Short එකකට sellers ආක්‍රමණශීලී (buyers ≤45%) වෙන්න ඕන. මේක අන්තිම ගනුදෙනු 500ක කෙටි කාලයක් විතරයි (Flow window column එකේ පේනවා).
 **Derivs +**: Open Interest වැඩි වෙමින් මිලත් ඒ දිශාවටම යනවා නම් +10, Funding rate එක ඒ දිශාවට හොඳයි නම් +5 (OKX / Bybit වලට විතරයි).
@@ -149,7 +157,7 @@ if res:
                 top_rows = d.head(k_ai).to_dict("records")
                 outs = []
                 for i, r in enumerate(top_rows):
-                    key = f"{r['coin']}|{r['dir']}|{r['score']}|{r['setup']}|{r['dom']}|{r['flow']}"
+                    key = f"{r['coin']}|{r['dir']}|{r['score']}|{r['setup']}|{r['dom']}|{r['flow']}|{r['pd_zone']}"
                     o = cache.get(key)
                     if o is None:  # same coin + same signal is not asked twice (saves free limits)
                         o = review_coin(r, provs)
@@ -166,9 +174,10 @@ if res:
             icon = {"AGREE": "🟢 AGREE", "CAUTION": "🟡 CAUTION", "REJECT": "🔴 REJECT", "ERROR": "⚠️ ERROR"}
             order = {"AGREE": 0, "CAUTION": 1, "REJECT": 2, "ERROR": 3}
 
-            st.markdown("### ✅ Final list (DOM + Flow + Technical + AI)")
+            st.markdown("### ✅ Final list (P/D + DOM + Flow + Technical + AI)")
             g1, g2, g3 = st.columns(3)
-            min_checks = g1.slider("Code checks අවම (5න්)", 0, 5, 4)
+            n_checks = max((len(o["sanity"]) for o in ai_out), default=6)
+            min_checks = g1.slider(f"Code checks අවම ({n_checks}න්)", 0, n_checks, min(n_checks - 1, 5))
             min_conf = g2.slider("AI confidence අවම", 0, 100, 50)
             show_rej = g3.checkbox("REJECT / ERROR ඒවාත් පෙන්නන්න", False)
             final = []
@@ -183,7 +192,9 @@ if res:
                 st.info("AI + Code දෙකම පාස් වුණ coin එකක් නැහැ. Sliders ලිහිල් කරන්න, නැත්නම් REJECT ඒවාත් පෙන්නන්න.")
             else:
                 st.dataframe(pd.DataFrame([{
-                    "Coin": o["coin"], "Dir": o["dir"], "Final": icon.get(str(o.get("verdict")).upper(), o.get("verdict")),
+                    "Coin": o["coin"], "Dir": o["dir"],
+                    "P/D": (f"{o['row'].get('pd_zone')} {o['row'].get('pd_pos'):.0f}%" if o["row"].get("pd_pos") is not None else ""),
+                    "Final": icon.get(str(o.get("verdict")).upper(), o.get("verdict")),
                     "AI confidence": o.get("confidence"), "Code score": o["row"].get("score"),
                     "Code checks": f"{sum(ok for _, ok in o['sanity'])}/{len(o['sanity'])}",
                     "Entry": fmt(o["row"]["entry"]), "Stop": fmt(o["row"]["stop"]),
