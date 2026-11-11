@@ -20,6 +20,10 @@ RULES = """Scanner rules (exact):
   Strength vs BTC up to 10, Setup 25, Derivs bonus up to 15, DOM (order book) -5..+10, Flow (taker flow) -5..+5. Score = sum, max 135.
 - Setup 'Breakout': 4H close beyond the previous 20-candle high (LONG) / low (SHORT).
   Setup 'Pullback': price within 1 ATR of 1H EMA20 and 1H RSI 38-55 (LONG) / 45-62 (SHORT). '-' = none.
+- Premium / Discount (NOT part of the score, it is a mandatory entry rule): the range is the high and low of the last 100 closed 4H candles.
+  pd_pos = price position inside that range, 0 (range low) to 100 (range high); above 50 = Premium, 50 or below = Discount.
+  LONG entries are only valid in Discount, SHORT entries only in Premium. pd_ok = 1 if the direction matches the zone, 0 if not.
+  If pd_ok = 0 the entry is on the wrong side of the range: the verdict must be REJECT (or CAUTION at most if everything else is very strong), and say so.
 - Derivs: +10 if open interest 24h change > 0 and price move agrees with the direction; +5 if funding <= 0.005% (LONG) or >= 0.01% (SHORT).
 - DOM fields (one order book snapshot, only the price range the snapshot covers):
   dom_share = bid share of bid+ask size within about 1% of price (0..1); bid_wall_x / ask_wall_x = size of the nearest wall
@@ -36,9 +40,9 @@ RULES = """Scanner rules (exact):
 SYSTEM = (
     "You are a strict crypto trading-signal auditor. You get the scanner output for ONE coin and the scanner's exact rules. "
     "Use ONLY the data given. Never invent prices, news, indicators or chart patterns. Check whether the direction, setup, "
-    "score parts and trade plan are consistent with the data and the rules, and point out weaknesses (e.g. RSI stretched, "
-    "volume weak, funding crowded, opposing order book wall before TP1, support wall vanished, taker flow against the direction, "
-    "price far from entry, low R:R). You cannot see the chart, so say when something cannot be verified. "
+    "score parts and trade plan are consistent with the data and the rules, and point out weaknesses (e.g. entry in the wrong "
+    "Premium/Discount half, RSI stretched, volume weak, funding crowded, opposing order book wall before TP1, support wall vanished, "
+    "taker flow against the direction, price far from entry, low R:R). You cannot see the chart, so say when something cannot be verified. "
     "Reply with ONLY one JSON object, no markdown: "
     '{"verdict":"AGREE|CAUTION|REJECT","confidence":0-100,"direction_ok":true|false,'
     '"checks":[{"rule":"short name","ok":true|false,"note":"short"}],"risks":["short"],'
@@ -103,12 +107,16 @@ def clean(row):
     """Row -> JSON-safe dict (numpy types and NaN handled; NaN becomes null = 'data not available')."""
     keys = ["coin", "dir", "score", "setup", "price", "chg24", "vs_btc", "rvol", "rsi", "er", "atr_pct",
             "oi24", "oi4", "funding", "bonus",
+            "pd_pos", "pd_zone", "pd_ok",
             "dom_share", "bid_wall_x", "bid_wall_dist", "ask_wall_x", "ask_wall_dist", "blocks", "persist", "dom",
             "flow_share", "flow_win", "flow",
             "entry", "stop", "tp1", "tp2", "why"]
     out = {}
     for k in keys:
         v = row.get(k)
+        if isinstance(v, (bool, np_bool)):
+            out[k] = int(v)
+            continue
         try:
             f = float(v)
             out[k] = None if f != f else round(f, 6)
@@ -117,8 +125,15 @@ def clean(row):
     return out
 
 
+try:  # numpy bool type, if numpy is available (it is, via pandas)
+    import numpy as _np
+    np_bool = _np.bool_
+except Exception:  # pragma: no cover
+    np_bool = bool
+
+
 def sanity(row):
-    """Pure-code checks (no AI): is the trade plan arithmetic consistent? Returns [(name, ok)]."""
+    """Pure-code checks (no AI): is the trade plan consistent and on the right side? Returns [(name, ok)]."""
     e, s, t1, t2 = (float(row[k]) for k in ("entry", "stop", "tp1", "tp2"))
     long_ = row["dir"] == "LONG"
     checks = [("Stop on the correct side", s < e if long_ else s > e),
@@ -128,6 +143,8 @@ def sanity(row):
     checks.append(("Setup exists (Breakout / Pullback)", row.get("setup") in ("Breakout", "Pullback")))
     rsi = float(row["rsi"])
     checks.append(("RSI not stretched against the trade", rsi < 75 if long_ else rsi > 25))
+    pd_ok = row.get("pd_ok", True)
+    checks.append(("Premium/Discount side correct (LONG=Discount, SHORT=Premium)", bool(pd_ok) if pd_ok == pd_ok else True))
     return checks
 
 
