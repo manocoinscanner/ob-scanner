@@ -10,7 +10,7 @@ from core.rank import run_rank
 
 st.set_page_config(page_title="Coin Ranker", page_icon="🏆", layout="wide")
 st.title("🏆 Coin Ranker")
-st.caption("හැම coin එකකටම ලකුණු දීලා ඉහළම ඒවා පෙන්නනවා. Filters නැහැ, ඒ නිසා ලැයිස්තුව කවදාවත් හිස් වෙන්නේ නැහැ.")
+st.caption("පළමුව DOM (order book) සහ order flow දෙකෙන්ම confirm වුණ coins විතරක් තෝරලා, ඊට පස්සේ technical analysis බලනවා.")
 
 c1, c2, c3, c4 = st.columns(4)
 exch_name = c1.selectbox("Data source", list(SOURCES)[::-1])
@@ -43,49 +43,81 @@ if res:
     if df.empty:
         st.warning("දත්ත ලැබුණේ නැහැ. වෙනත් Data source එකක් තෝරන්න.")
     else:
-        f1, f2 = st.columns(2)
-        side = f1.radio("Direction", ["All", "LONG", "SHORT"], horizontal=True)
-        only_setup = f2.checkbox("Breakout / Pullback setup තියෙන ඒවා විතරයි (optional)", False)
-        d = df
+        # technical score = total score without the DOM / Flow / Derivs parts (max 100)
+        df["tech"] = (df["score"] - df["bonus"].astype(float) - df["dom"].astype(float) - df["flow"].astype(float)).round(1)
+
+        st.markdown("### 🔒 Confirm නීති (පළමුව DOM + Flow, ඊට පස්සේ Technical)")
+        r1, r2, r3 = st.columns(3)
+        need_dom = r1.checkbox("DOM (order book) confirm අනිවාර්යයි", True,
+                               help="Order book data ලැබෙන්න ඕන, DOM ලකුණු ධනාත්මක, TP1 ට හරහට wall නැහැ, support wall එක අතුරුදහන් වෙලා නැහැ.")
+        need_flow = r2.checkbox("Order flow (taker flow) confirm අනිවාර්යයි", True,
+                                help="Taker flow data ලැබෙන්න ඕන සහ Flow ලකුණු ධනාත්මක.")
+        need_setup = r3.checkbox("Technical: Breakout / Pullback setup අනිවාර්යයි", True)
+        min_tech = st.slider("Technical ලකුණු අවම (100න්, DOM/Flow/Derivs නැතුව)", 0, 100, 50)
+
+        side = st.radio("Direction", ["All", "LONG", "SHORT"], horizontal=True)
+
+        work = df
+        funnel = [("Scan result (සියලු coins)", len(work))]
         if side != "All":
-            d = d[d["dir"] == side]
-        if only_setup:
-            d = d[d["setup"] != "-"]
-        d = d.head(show_n)
-        fmt = lambda x: f"{x:.6g}"
-        persist_txt = d["persist"].astype(float).map(lambda x: "" if x != x else ("✅ yes" if x == 1 else "⚠️ vanished (spoof?)"))
-        table = pd.DataFrame({
-            "#": range(1, len(d) + 1), "Coin": d["coin"],
-            "Dir": d["dir"].map({"LONG": "🟢 LONG", "SHORT": "🔴 SHORT"}), "Score": d["score"],
-            "Setup": d["setup"], "Price": d["price"].map(fmt), "24h %": d["chg24"].round(2),
-            "vs BTC %": d["vs_btc"].round(2), "RVOL": d["rvol"].round(1), "RSI 1H": d["rsi"].round(0),
-            "Trend ER": d["er"].round(2),
-            "OI 24h %": d["oi24"].astype(float).round(1), "OI 4h %": d["oi4"].astype(float).round(1),
-            "Funding %": (d["funding"].astype(float) * 100).round(4), "Derivs +": d["bonus"],
-            "Bid share %": (d["dom_share"].astype(float) * 100).round(0),
-            "Bid wall (× / dist%)": [("" if x != x else f"{x:.0f}× / {y:.2f}%") for x, y in zip(d["bid_wall_x"].astype(float), d["bid_wall_dist"].astype(float))],
-            "Ask wall (× / dist%)": [("" if x != x else f"{x:.0f}× / {y:.2f}%") for x, y in zip(d["ask_wall_x"].astype(float), d["ask_wall_dist"].astype(float))],
-            "Wall blocks TP1": np.where(d["blocks"].astype(bool), "⚠️ yes", ""),
-            "Wall persists": persist_txt, "DOM +": d["dom"],
-            "Taker buy %": (d["flow_share"].astype(float) * 100).round(0),
-            "Flow window (min)": d["flow_win"].astype(float).round(1), "Flow +": d["flow"],
-            "Entry": d["entry"].map(fmt), "Stop": d["stop"].map(fmt),
-            "TP1 (1.5R)": d["tp1"].map(fmt), "TP2 (3R)": d["tp2"].map(fmt), "ලකුණු බෙදීම": d["why"],
-        })
+            work = work[work["dir"] == side]
+            funnel.append((f"Direction = {side}", len(work)))
+        if need_dom:
+            work = work[(work["dom_share"].astype(float).notna()) & (work["dom"].astype(float) > 0)
+                        & (~work["blocks"].astype(bool)) & (work["persist"].astype(float).fillna(1.0) != 0.0)]
+            funnel.append(("DOM confirm ✅", len(work)))
+        if need_flow:
+            work = work[(work["flow_share"].astype(float).notna()) & (work["flow"].astype(float) > 0)]
+            funnel.append(("Order flow confirm ✅", len(work)))
+        if need_setup:
+            work = work[work["setup"] != "-"]
+            funnel.append(("Technical: setup තියෙනවා", len(work)))
+        if min_tech > 0:
+            work = work[work["tech"] >= min_tech]
+            funnel.append((f"Technical ලකුණු ≥ {min_tech}", len(work)))
+        work = work.sort_values("score", ascending=False)
+
+        st.markdown("**Filter funnel** (coins ඉතුරු වෙන ප්‍රමාණය පියවරෙන් පියවර)")
+        st.dataframe(pd.DataFrame(funnel, columns=["පියවර", "Coins left"]), hide_index=True)
         if not meta.get("dom"):
-            st.info("Order book (DOM) data ගන්න බැරි වුණා, නැත්නම් ඒ coins වල book එක ඉතා තුනී. ඒ නිසා DOM ලකුණු 0.")
+            st.warning("මේ scan එකේ Order book (DOM) data කිසිම coin එකකට ලැබුණේ නැහැ. DOM confirm අනිවාර්ය නම් ලැයිස්තුව හිස් වෙනවා.")
         if not meta.get("flow"):
-            st.info("Taker flow (CVD) data ගන්න බැරි වුණා, නැත්නම් ගනුදෙනු කාල පරාසය ඉතා කෙටියි. ඒ නිසා Flow ලකුණු 0.")
-        if not meta.get("derivs"):
-            st.info("OI / Funding data නැහැ. Data source එක **OKX** හෝ **Bybit** තෝරන්න (Binance Spot වල derivatives නැහැ).")
-        st.dataframe(table, hide_index=True)
-        st.download_button("⬇️ Download CSV", table.to_csv(index=False), "ranking.csv", "text/csv")
+            st.warning("මේ scan එකේ Taker flow data කිසිම coin එකකට ලැබුණේ නැහැ. Flow confirm අනිවාර්ය නම් ලැයිස්තුව හිස් වෙනවා.")
+
+        d = work.head(show_n)
+        if d.empty:
+            st.info("Confirm වුණ coin එකක් නැහැ. Funnel table එකේ Coins left 0 වෙන පළවෙනි පියවර බලලා, ඒ නීතියේ ටික් එක අයින් කරන්න "
+                    "(නැත්නම් Technical ලකුණු අවම අඩු කරන්න). DOM/Flow data එන්නේ ලකුණු අනුව ඉහළම coins 40ට විතරයි.")
+        else:
+            fmt = lambda x: f"{x:.6g}"
+            persist_txt = d["persist"].astype(float).map(lambda x: "" if x != x else ("✅ yes" if x == 1 else "⚠️ vanished (spoof?)"))
+            table = pd.DataFrame({
+                "#": range(1, len(d) + 1), "Coin": d["coin"],
+                "Dir": d["dir"].map({"LONG": "🟢 LONG", "SHORT": "🔴 SHORT"}), "Score": d["score"],
+                "Tech (100)": d["tech"], "Setup": d["setup"], "Price": d["price"].map(fmt), "24h %": d["chg24"].round(2),
+                "vs BTC %": d["vs_btc"].round(2), "RVOL": d["rvol"].round(1), "RSI 1H": d["rsi"].round(0),
+                "Trend ER": d["er"].round(2),
+                "OI 24h %": d["oi24"].astype(float).round(1), "OI 4h %": d["oi4"].astype(float).round(1),
+                "Funding %": (d["funding"].astype(float) * 100).round(4), "Derivs +": d["bonus"],
+                "Bid share %": (d["dom_share"].astype(float) * 100).round(0),
+                "Bid wall (× / dist%)": [("" if x != x else f"{x:.0f}× / {y:.2f}%") for x, y in zip(d["bid_wall_x"].astype(float), d["bid_wall_dist"].astype(float))],
+                "Ask wall (× / dist%)": [("" if x != x else f"{x:.0f}× / {y:.2f}%") for x, y in zip(d["ask_wall_x"].astype(float), d["ask_wall_dist"].astype(float))],
+                "Wall blocks TP1": np.where(d["blocks"].astype(bool), "⚠️ yes", ""),
+                "Wall persists": persist_txt, "DOM +": d["dom"],
+                "Taker buy %": (d["flow_share"].astype(float) * 100).round(0),
+                "Flow window (min)": d["flow_win"].astype(float).round(1), "Flow +": d["flow"],
+                "Entry": d["entry"].map(fmt), "Stop": d["stop"].map(fmt),
+                "TP1 (1.5R)": d["tp1"].map(fmt), "TP2 (3R)": d["tp2"].map(fmt), "ලකුණු බෙදීම": d["why"],
+            })
+            st.success(f"{len(d)} coins confirm වුණා")
+            st.dataframe(table, hide_index=True)
+            st.download_button("⬇️ Download CSV", table.to_csv(index=False), "ranking.csv", "text/csv")
+
         st.markdown("""
-**ලකුණු (උපරිමය 135)**: 4H trend 25 + 1H trend 10 + පිරිසිදු trend 15 + Volume 15 + BTC ට වඩා ශක්තිමත් 10 + Setup 25 (Breakout හෝ Pullback) + Derivs 15 + DOM 10 + Flow 5 + (wall persistence).
+**ලකුණු (උපරිමය 135)**: 4H trend 25 + 1H trend 10 + පිරිසිදු trend 15 + Volume 15 + BTC ට වඩා ශක්තිමත් 10 + Setup 25 (Breakout හෝ Pullback) + Derivs 15 + DOM 10 + Flow 5. **Tech (100)** = Derivs, DOM, Flow අයින් කළාම ඉතුරු ලකුණු.
+**DOM confirm**: Order book data ලැබිලා, ඔයාගේ දිශාවට support wall එකක් (මිලට 2% ඇතුළත) හෝ bid/ask බර තියෙන්න ඕන; TP1 ට හරහට විරුද්ධ wall එකක් නොතියෙන්න ඕන; support wall එක දෙවෙනි snapshot එකේ අතුරුදහන් වෙලා නොතියෙන්න ඕන.
+**Order flow confirm**: Taker flow data ලැබිලා, Long එකකට buyers ≥55% හෝ Short එකකට sellers ආක්‍රමණශීලී (buyers ≤45%) වෙන්න ඕන. මේක අන්තිම ගනුදෙනු 500ක කෙටි කාලයක් විතරයි (Flow window column එකේ පේනවා).
 **Derivs +**: Open Interest වැඩි වෙමින් මිලත් ඒ දිශාවටම යනවා නම් +10, Funding rate එක ඒ දිශාවට හොඳයි නම් +5 (OKX / Bybit වලට විතරයි).
-**DOM +** (order book): ඔයාගේ දිශාවට උපකාරක විශාල limit order "බිත්තියක්" (wall) මිල ළඟ තියෙනවා නම් +5, bid/ask ප්‍රමාණය ඔයාගේ දිශාවට බරයි නම් +5, TP1 ට යන පාරේ විරුද්ධ wall එකක් තියෙනවා නම් −5. Wall = ඒ පැත්තේ මධ්‍යස්ථ order එකට වඩා 8 ගුණයක් විශාල order එකක්.
-**Wall persists**: Order book එක දෙපාරක් (තත්පර කීපයක් පරතරයකින්) ගන්නවා. උපකාරක wall එක එහෙමම තියෙනවා නම් ✅. අතුරුදහන් වෙලා නම් "vanished (spoof?)" කියලා පෙන්නලා ඒ +5 අයින් කරනවා.
-**Flow +** (taker flow / CVD): අන්තිම ගනුදෙනු වලින් buyers ආක්‍රමණශීලීව ගහපු කොටස. Long එකකට ≥55% නම් +5, ≤40% නම් −5 (Short එකට අනිත් පැත්ත). මේක අන්තිම ගනුදෙනු 500-1000ක කෙටි කාලයක් විතරයි (Flow window column එකේ පේනවා).
 **Stop** = 1H ATR එකෙන් 1.5ක්, **TP1** = 1.5R, **TP2** = 3R.
 **Breakout** = 4H එකේ අන්තිම 20 candles ඉහළම/පහළම කඩලා close වීම. **Pullback** = trend එක තියෙද්දී 1H EMA20 ළඟට ආපහු ඇවිත් RSI මධ්‍යස්ථව තියෙන තැන.
 """)
@@ -103,11 +135,13 @@ if res:
         if not provs:
             st.info("AI keys තවම දාලා නැහැ. Streamlit → Manage app → Settings → Secrets වල අවම වශයෙන් එක key එකක් දාන්න "
                     "(`GEMINI_API_KEY`, `GROQ_API_KEY`). ඒවා නොමිලේ ගන්න පුළුවන්.")
+        elif d.empty:
+            st.info("AI review කරන්න coins නැහැ (confirm වුණ coin එකක් නැහැ).")
         else:
             st.caption("Connected: " + " → ".join(p["name"] for p in provs) +
-                       " (එකක් limit වුණොත් ඊළඟ එකට ස්වයංක්‍රීයව මාරු වෙනවා)")
+                       " (එකක් limit වුණොත් ඊළඟ එකට ස්වයංක්‍රීයව මාරු වෙනවා) | AI review කරන්නේ confirm වුණ coins විතරයි")
             a1, a2 = st.columns([3, 1])
-            k_ai = a1.slider("Code එකෙන් ඉහළට ආපු coins කීයක් AI එකෙන් check කරන්නද", 1, 25, 10)
+            k_ai = a1.slider("Confirm වුණ coins කීයක් AI එකෙන් check කරන්නද", 1, 25, min(10, max(1, len(d))))
             a2.write("")
             if a2.button("🤖 Run AI review"):
                 cache = st.session_state.setdefault("ai_cache", {})
@@ -115,7 +149,7 @@ if res:
                 top_rows = d.head(k_ai).to_dict("records")
                 outs = []
                 for i, r in enumerate(top_rows):
-                    key = f"{r['coin']}|{r['dir']}|{r['score']}|{r['setup']}"
+                    key = f"{r['coin']}|{r['dir']}|{r['score']}|{r['setup']}|{r['dom']}|{r['flow']}"
                     o = cache.get(key)
                     if o is None:  # same coin + same signal is not asked twice (saves free limits)
                         o = review_coin(r, provs)
@@ -132,7 +166,7 @@ if res:
             icon = {"AGREE": "🟢 AGREE", "CAUTION": "🟡 CAUTION", "REJECT": "🔴 REJECT", "ERROR": "⚠️ ERROR"}
             order = {"AGREE": 0, "CAUTION": 1, "REJECT": 2, "ERROR": 3}
 
-            st.markdown("### ✅ Final list (Code + AI දෙකටම අනුව)")
+            st.markdown("### ✅ Final list (DOM + Flow + Technical + AI)")
             g1, g2, g3 = st.columns(3)
             min_checks = g1.slider("Code checks අවම (5න්)", 0, 5, 4)
             min_conf = g2.slider("AI confidence අවම", 0, 100, 50)
@@ -146,7 +180,7 @@ if res:
                     final.append((order.get(v, 3), -conf, -(o["row"].get("score") or 0), o))
             final.sort(key=lambda x: x[:3])
             if not final:
-                st.info("Code + AI දෙකම පාස් වුණ coin එකක් නැහැ. Sliders ලිහිල් කරන්න, නැත්නම් REJECT ඒවාත් පෙන්නන්න.")
+                st.info("AI + Code දෙකම පාස් වුණ coin එකක් නැහැ. Sliders ලිහිල් කරන්න, නැත්නම් REJECT ඒවාත් පෙන්නන්න.")
             else:
                 st.dataframe(pd.DataFrame([{
                     "Coin": o["coin"], "Dir": o["dir"], "Final": icon.get(str(o.get("verdict")).upper(), o.get("verdict")),
