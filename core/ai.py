@@ -31,16 +31,17 @@ SYSTEM = (
     "Reply with ONLY one JSON object, no markdown: "
     '{"verdict":"AGREE|CAUTION|REJECT","confidence":0-100,"direction_ok":true|false,'
     '"checks":[{"rule":"short name","ok":true|false,"note":"short"}],"risks":["short"],'
-    '"summary":"max 3 sentences, in Sinhala"}\n\n' + RULES
+    '"summary":"max 2 sentences, in Sinhala"}. Keep it SHORT: at most 4 checks (notes max 10 words), at most 3 risks. '
+    "Put verdict, confidence and direction_ok FIRST.\n\n" + RULES
 )
 
 
 def providers(get):
     """Build the list of usable providers from secrets/env. `get(name)` returns a string or None."""
     spec = [
-        ("Gemini", "GEMINI_API_KEY", GEMINI_URL, get("GEMINI_MODEL") or "gemini-2.5-flash"),
-        ("Groq-70B", "GROQ_API_KEY", GROQ_URL, get("GROQ_MODEL") or "llama-3.3-70b-versatile"),
-        ("Groq-8B", "GROQ_API_KEY", GROQ_URL, get("GROQ_MODEL2") or "llama-3.1-8b-instant"),
+        ("Gemini", "GEMINI_API_KEY", GEMINI_URL, get("GEMINI_MODEL") or "gemini-3.5-flash"),
+        ("Groq-70B", "GROQ_API_KEY", GROQ_URL, get("GROQ_MODEL") or "openai/gpt-oss-120b"),
+        ("Groq-8B", "GROQ_API_KEY", GROQ_URL, get("GROQ_MODEL2") or "openai/gpt-oss-20b"),
         ("OpenRouter", "OPENROUTER_API_KEY", OPENROUTER_URL,
          get("OPENROUTER_MODEL") or "meta-llama/llama-3.3-70b-instruct:free"),
         ("Extra", "EXTRA_API_KEY", get("EXTRA_API_URL"), get("EXTRA_MODEL")),
@@ -48,7 +49,13 @@ def providers(get):
     return [{"name": n, "key": get(k), "url": u, "model": m} for n, k, u, m in spec if get(k) and u and m]
 
 
-def ask(messages, provs, max_tokens=900):
+def _post(p, messages, max_tokens, extras):
+    body = {"model": p["model"], "messages": messages, "temperature": 0.2, "max_tokens": max_tokens, **extras}
+    return requests.post(p["url"], timeout=60, json=body,
+                         headers={"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"})
+
+
+def ask(messages, provs, max_tokens=2000):
     """Try each provider in order. Returns (text, provider name, list of error strings)."""
     errors = []
     for p in provs:
@@ -56,17 +63,20 @@ def ask(messages, provs, max_tokens=900):
             errors.append(f"{p['name']}: cooling down")
             continue
         try:
-            r = requests.post(p["url"], timeout=60,
-                              headers={"Authorization": f"Bearer {p['key']}", "Content-Type": "application/json"},
-                              json={"model": p["model"], "messages": messages, "temperature": 0.2,
-                                    "max_tokens": max_tokens})
-            if r.status_code == 429:
+            extras = {"reasoning_effort": "low"} if p["name"].startswith("Groq") and "gpt-oss" in p["model"] else {}
+            r = _post(p, messages, max_tokens, extras)
+            if r.status_code == 400 and extras:  # provider does not know reasoning_effort: retry without it
+                r = _post(p, messages, max_tokens, {})
+            if r.status_code in (500, 502, 503, 504):  # temporary server problem: wait a little, retry once
+                time.sleep(3)
+                r = _post(p, messages, max_tokens, extras if r.status_code != 400 else {})
+            if r.status_code in (429, 413):
                 COOLDOWN[p["name"]] = time.time() + 120
-                errors.append(f"{p['name']}: limit reached (429)")
+                errors.append(f"{p['name']}: limit reached ({r.status_code})")
                 continue
             if r.status_code != 200:
-                COOLDOWN[p["name"]] = time.time() + 30
-                errors.append(f"{p['name']}: HTTP {r.status_code} {r.text[:120]}")
+                COOLDOWN[p["name"]] = time.time() + (15 if r.status_code >= 500 else 60)
+                errors.append(f"{p['name']}: HTTP {r.status_code} {r.text[:100]}")
                 continue
             text = r.json()["choices"][0]["message"]["content"]
             if text and text.strip():
@@ -74,7 +84,7 @@ def ask(messages, provs, max_tokens=900):
             errors.append(f"{p['name']}: empty answer")
         except Exception as e:
             COOLDOWN[p["name"]] = time.time() + 30
-            errors.append(f"{p['name']}: {str(e)[:120]}")
+            errors.append(f"{p['name']}: {str(e)[:100]}")
     return None, None, errors
 
 
@@ -108,20 +118,33 @@ def sanity(row):
 
 
 def parse(text):
+    """Strict JSON first. If the answer is cut off or slightly broken, salvage the key fields."""
     m = re.search(r"\{.*\}", text, re.S)
     if m:
         try:
-            return json.loads(m.group(0))
+            out = json.loads(m.group(0))
+            if isinstance(out, dict) and "verdict" in out:
+                return out
         except Exception:
             pass
-    return {"verdict": "CAUTION", "confidence": 0, "summary": text.strip()[:400], "checks": [], "risks": []}
+    v = re.search(r'"verdict"\s*:\s*"(AGREE|CAUTION|REJECT)"', text, re.I)
+    c = re.search(r'"confidence"\s*:\s*(\d+)', text)
+    d = re.search(r'"direction_ok"\s*:\s*(true|false)', text, re.I)
+    sm = re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)', text, re.S)
+    if v:
+        return {"verdict": v.group(1).upper(), "confidence": int(c.group(1)) if c else 0,
+                "direction_ok": (d.group(1).lower() == "true") if d else None, "checks": [], "risks": [],
+                "summary": sm.group(1) if sm and sm.group(1).strip() else "(AI උත්තරය කැපිලා, summary නැහැ)"}
+    return {"verdict": "CAUTION", "confidence": 0, "checks": [], "risks": [],
+            "summary": "AI උත්තරය තේරුම් ගන්න බැරි වුණා. ආයෙත් run කරන්න."}
 
 
 def review_coin(row, provs):
     msgs = [{"role": "system", "content": SYSTEM},
             {"role": "user", "content": json.dumps(clean(row), ensure_ascii=False)}]
     text, name, errors = ask(msgs, provs)
-    base = {"coin": row.get("coin"), "dir": row.get("dir"), "sanity": sanity(row), "errors": errors}
+    base = {"coin": row.get("coin"), "dir": row.get("dir"), "sanity": sanity(row), "errors": errors,
+            "row": clean(row)}
     if text is None:
         return {**base, "verdict": "ERROR", "confidence": 0, "provider": "-", "checks": [], "risks": [],
                 "summary": "සියලු AI providers limit වෙලා හෝ error: " + "; ".join(errors)}
