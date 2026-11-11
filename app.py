@@ -1,7 +1,10 @@
+import time
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
+from core.ai import providers, review_coin
 from core.data import SOURCES
 from core.rank import run_rank
 
@@ -67,6 +70,55 @@ if res:
 **Stop** = 1H ATR එකෙන් 1.5ක්, **TP1** = 1.5R, **TP2** = 3R.
 **Breakout** = 4H එකේ අන්තිම 20 candles ඉහළම/පහළම කඩලා close වීම. **Pullback** = trend එක තියෙද්දී 1H EMA20 ළඟට ආපහු ඇවිත් RSI මධ්‍යස්ථව තියෙන තැන.
 """)
+
+        # ───────────── AI review (optional, free AIs with automatic fallback) ─────────────
+        st.subheader("🤖 AI review (optional)")
+
+        def get_secret(name):
+            try:
+                return st.secrets.get(name)
+            except Exception:
+                return None
+
+        provs = providers(get_secret)
+        if not provs:
+            st.info("AI keys තවම දාලා නැහැ. Streamlit → Manage app → Settings → Secrets වල අවම වශයෙන් එක key එකක් දාන්න "
+                    "(`GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`). ඒවා නොමිලේ ගන්න පුළුවන්.")
+        else:
+            st.caption("Connected: " + " → ".join(p["name"] for p in provs) +
+                       " (එකක් limit වුණොත් ඊළඟ එකට ස්වයංක්‍රීයව මාරු වෙනවා)")
+            k_ai = st.slider("ඉහළම coins කීයක් AI එකෙන් check කරන්නද", 1, 10, 5)
+            if st.button("🤖 Run AI review"):
+                outs, bar2 = [], st.progress(0.0, text="AI reviewing ...")
+                top_rows = d.head(k_ai).to_dict("records")
+                for i, r in enumerate(top_rows):
+                    outs.append(review_coin(r, provs))
+                    bar2.progress((i + 1) / len(top_rows))
+                    time.sleep(1)
+                bar2.empty()
+                st.session_state["ai"] = outs
+        ai_out = st.session_state.get("ai")
+        if ai_out:
+            icon = {"AGREE": "🟢 AGREE", "CAUTION": "🟡 CAUTION", "REJECT": "🔴 REJECT", "ERROR": "⚠️ ERROR"}
+            st.dataframe(pd.DataFrame([{
+                "Coin": o["coin"], "Dir": o["dir"], "AI verdict": icon.get(str(o.get("verdict")).upper(), o.get("verdict")),
+                "Confidence": o.get("confidence"), "AI": o.get("provider"),
+                "Code checks": f"{sum(ok for _, ok in o['sanity'])}/{len(o['sanity'])} ✅",
+                "Summary": o.get("summary")} for o in ai_out]), hide_index=True)
+            for o in ai_out:
+                with st.expander(f"{o['coin']} {o['dir']}: විස්තර"):
+                    st.write("**Code checks (AI නැතුව)**")
+                    for name, ok in o["sanity"]:
+                        st.write(("✅ " if ok else "❌ ") + name)
+                    if o.get("checks"):
+                        st.write("**AI checks**")
+                        for c in o["checks"]:
+                            st.write(("✅ " if c.get("ok") else "❌ ") + f"{c.get('rule')}: {c.get('note')}")
+                    if o.get("risks"):
+                        st.write("**Risks**: " + "; ".join(map(str, o["risks"])))
+                    if o.get("errors"):
+                        st.caption("Provider notes: " + " | ".join(o["errors"]))
+            st.caption("AI එකට පේන්නේ scanner දත්ත විතරයි, chart එක නෙවෙයි. එයාට වැරදිය හැකියි. Verdict එක තනි තීරණයක් විදිහට පාවිච්චි කරන්න එපා.")
 else:
     st.info("**Scan now** එබුවාම ලැයිස්තුව එනවා.")
 
