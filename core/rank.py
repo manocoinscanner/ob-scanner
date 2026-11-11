@@ -109,12 +109,19 @@ def derivs_bonus(r):
 
 
 # ───────────────────────── order book (DOM) ─────────────────────────
+def _norm_levels(levels):
+    """Order book levels -> [[price, qty]]. Some exchanges (OKX) send 3+ values per level; only the
+    first two (price, size) are used."""
+    return [[float(x[0]), float(x[1])] for x in levels]
+
+
 def get_book(ex, sym):
     """Order book snapshot {'bids': [[price, qty], ...], 'asks': [...]}."""
     if hasattr(ex, "BASE") and hasattr(ex, "_get"):  # the small Binance Spot client
         j = ex._get("/depth", {"symbol": sym, "limit": 1000})
-        return {"bids": j["bids"], "asks": j["asks"]}
-    return ex.fetch_order_book(sym, 200)
+        return {"bids": _norm_levels(j["bids"]), "asks": _norm_levels(j["asks"])}
+    bk = ex.fetch_order_book(sym, 200)
+    return {"bids": _norm_levels(bk["bids"]), "asks": _norm_levels(bk["asks"])}
 
 
 def _walls(levels, mult=8.0, min_levels=10):
@@ -130,8 +137,8 @@ def _walls(levels, mult=8.0, min_levels=10):
 def book_features(book, price, side, tp1):
     """Order-book (DOM) features around the price. Uses only the range the snapshot really covers.
     Returns a dict or None when the snapshot is too thin."""
-    bids = [(float(p), float(q)) for p, q in book["bids"]]
-    asks = [(float(p), float(q)) for p, q in book["asks"]]
+    bids = [(float(x[0]), float(x[1])) for x in book["bids"]]
+    asks = [(float(x[0]), float(x[1])) for x in book["asks"]]
     if len(bids) < 20 or len(asks) < 20:
         return None
     cover = min(price - bids[-1][0], asks[-1][0] - price) / price  # both sides visible up to this distance
@@ -202,13 +209,17 @@ def get_trades(ex, sym):
             for t in tr if t.get("timestamp") and t.get("price") and t.get("amount") and t.get("side") in ("buy", "sell")]
 
 
+MIN_TRADES = 100     # fewer trades than this = too noisy
+MIN_WINDOW_MIN = 0.2  # about 12 seconds; busy coins fill 500 trades in under a minute
+
+
 def flow_features(trades, side):
-    """Taker buy share of the traded value + points. None if too few trades or window < 1 minute."""
-    if len(trades) < 50:
+    """Taker buy share of the traded value + points. None if too few trades or the window is too short."""
+    if len(trades) < MIN_TRADES:
         return None
     ts = [t[0] for t in trades]
     win = (max(ts) - min(ts)) / 60000
-    if win < 1.0:
+    if win < MIN_WINDOW_MIN:
         return None
     buy = sum(p * q for _, p, q, b in trades if b)
     tot = sum(p * q for _, p, q, _ in trades)
