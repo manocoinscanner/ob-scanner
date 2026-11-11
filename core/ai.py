@@ -17,17 +17,28 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 RULES = """Scanner rules (exact):
 - Direction: LONG if 4H EMA20 > EMA50, SHORT if below (tie: sign of 24h change).
 - Score parts (see 'why'): 4H trend up to 25, 1H trend 10, Clean trend (efficiency ratio) up to 15, Volume (RVOL) up to 15,
-  Strength vs BTC up to 10, Setup 25, Derivs bonus up to 15 (Score = sum).
+  Strength vs BTC up to 10, Setup 25, Derivs bonus up to 15, DOM (order book) -5..+10, Flow (taker flow) -5..+5. Score = sum, max 135.
 - Setup 'Breakout': 4H close beyond the previous 20-candle high (LONG) / low (SHORT).
   Setup 'Pullback': price within 1 ATR of 1H EMA20 and 1H RSI 38-55 (LONG) / 45-62 (SHORT). '-' = none.
 - Derivs: +10 if open interest 24h change > 0 and price move agrees with the direction; +5 if funding <= 0.005% (LONG) or >= 0.01% (SHORT).
+- DOM fields (one order book snapshot, only the price range the snapshot covers):
+  dom_share = bid share of bid+ask size within about 1% of price (0..1); bid_wall_x / ask_wall_x = size of the nearest wall
+  as a multiple of the median level size (a wall is >= 8x); bid_wall_dist / ask_wall_dist = its distance from price in %;
+  blocks = 1 if an opposing wall sits between price and TP1; persist = 1 if the support wall was still there on a second
+  snapshot, 0 if it vanished or shrank (possible spoof), null if not checked; dom = DOM points.
+  DOM points: +5 support wall within 2% on our side, +5 if dom_share >= 0.58 (LONG) / <= 0.42 (SHORT), -5 if an opposing wall blocks TP1,
+  -5 more if the support wall vanished.
+- Flow fields: flow_share = share of traded value in the last trades that was taker BUY (0..1); flow_win = minutes those trades cover
+  (usually only seconds to a few minutes, so weak evidence); flow = Flow points (LONG: +5 if >= 0.55, -5 if <= 0.40; SHORT: mirror).
+- A null value means the data was NOT available. Do not guess it and do not treat it as bad or good: say it cannot be verified.
 - Trade plan: entry = price, stop = 1.5 x ATR(1H) against the direction, TP1 = 1.5R, TP2 = 3R."""
 
 SYSTEM = (
     "You are a strict crypto trading-signal auditor. You get the scanner output for ONE coin and the scanner's exact rules. "
     "Use ONLY the data given. Never invent prices, news, indicators or chart patterns. Check whether the direction, setup, "
     "score parts and trade plan are consistent with the data and the rules, and point out weaknesses (e.g. RSI stretched, "
-    "volume weak, funding crowded, price far from entry, low R:R). You cannot see the chart, so say when something cannot be verified. "
+    "volume weak, funding crowded, opposing order book wall before TP1, support wall vanished, taker flow against the direction, "
+    "price far from entry, low R:R). You cannot see the chart, so say when something cannot be verified. "
     "Reply with ONLY one JSON object, no markdown: "
     '{"verdict":"AGREE|CAUTION|REJECT","confidence":0-100,"direction_ok":true|false,'
     '"checks":[{"rule":"short name","ok":true|false,"note":"short"}],"risks":["short"],'
@@ -89,9 +100,12 @@ def ask(messages, provs, max_tokens=2000):
 
 
 def clean(row):
-    """Row -> JSON-safe dict (numpy types and NaN handled)."""
+    """Row -> JSON-safe dict (numpy types and NaN handled; NaN becomes null = 'data not available')."""
     keys = ["coin", "dir", "score", "setup", "price", "chg24", "vs_btc", "rvol", "rsi", "er", "atr_pct",
-            "oi24", "oi4", "funding", "bonus", "entry", "stop", "tp1", "tp2", "why"]
+            "oi24", "oi4", "funding", "bonus",
+            "dom_share", "bid_wall_x", "bid_wall_dist", "ask_wall_x", "ask_wall_dist", "blocks", "persist", "dom",
+            "flow_share", "flow_win", "flow",
+            "entry", "stop", "tp1", "tp2", "why"]
     out = {}
     for k in keys:
         v = row.get(k)
