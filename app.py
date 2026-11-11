@@ -83,42 +83,78 @@ if res:
         provs = providers(get_secret)
         if not provs:
             st.info("AI keys තවම දාලා නැහැ. Streamlit → Manage app → Settings → Secrets වල අවම වශයෙන් එක key එකක් දාන්න "
-                    "(`GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`). ඒවා නොමිලේ ගන්න පුළුවන්.")
+                    "(`GEMINI_API_KEY`, `GROQ_API_KEY`). ඒවා නොමිලේ ගන්න පුළුවන්.")
         else:
             st.caption("Connected: " + " → ".join(p["name"] for p in provs) +
                        " (එකක් limit වුණොත් ඊළඟ එකට ස්වයංක්‍රීයව මාරු වෙනවා)")
-            k_ai = st.slider("ඉහළම coins කීයක් AI එකෙන් check කරන්නද", 1, 10, 5)
-            if st.button("🤖 Run AI review"):
-                outs, bar2 = [], st.progress(0.0, text="AI reviewing ...")
+            a1, a2 = st.columns([3, 1])
+            k_ai = a1.slider("Code එකෙන් ඉහළට ආපු coins කීයක් AI එකෙන් check කරන්නද", 1, 25, 10)
+            a2.write("")
+            if a2.button("🤖 Run AI review"):
+                cache = st.session_state.setdefault("ai_cache", {})
+                bar2 = st.progress(0.0, text="AI reviewing ...")
                 top_rows = d.head(k_ai).to_dict("records")
+                outs = []
                 for i, r in enumerate(top_rows):
-                    outs.append(review_coin(r, provs))
+                    key = f"{r['coin']}|{r['dir']}|{r['score']}|{r['setup']}"
+                    o = cache.get(key)
+                    if o is None:  # same coin + same signal is not asked twice (saves free limits)
+                        o = review_coin(r, provs)
+                        if o.get("verdict") != "ERROR":
+                            cache[key] = o
+                        time.sleep(2)
+                    outs.append(o)
                     bar2.progress((i + 1) / len(top_rows))
-                    time.sleep(1)
                 bar2.empty()
                 st.session_state["ai"] = outs
+
         ai_out = st.session_state.get("ai")
         if ai_out:
             icon = {"AGREE": "🟢 AGREE", "CAUTION": "🟡 CAUTION", "REJECT": "🔴 REJECT", "ERROR": "⚠️ ERROR"}
-            st.dataframe(pd.DataFrame([{
-                "Coin": o["coin"], "Dir": o["dir"], "AI verdict": icon.get(str(o.get("verdict")).upper(), o.get("verdict")),
-                "Confidence": o.get("confidence"), "AI": o.get("provider"),
-                "Code checks": f"{sum(ok for _, ok in o['sanity'])}/{len(o['sanity'])} ✅",
-                "Summary": o.get("summary")} for o in ai_out]), hide_index=True)
+            order = {"AGREE": 0, "CAUTION": 1, "REJECT": 2, "ERROR": 3}
+
+            st.markdown("### ✅ Final list (Code + AI දෙකටම අනුව)")
+            g1, g2, g3 = st.columns(3)
+            min_checks = g1.slider("Code checks අවම (5න්)", 0, 5, 4)
+            min_conf = g2.slider("AI confidence අවම", 0, 100, 50)
+            show_rej = g3.checkbox("REJECT / ERROR ඒවාත් පෙන්නන්න", False)
+            final = []
             for o in ai_out:
-                with st.expander(f"{o['coin']} {o['dir']}: විස්තර"):
-                    st.write("**Code checks (AI නැතුව)**")
+                v = str(o.get("verdict")).upper()
+                passed = sum(ok for _, ok in o["sanity"])
+                conf = o.get("confidence") or 0
+                if show_rej or (v in ("AGREE", "CAUTION") and passed >= min_checks and conf >= min_conf):
+                    final.append((order.get(v, 3), -conf, -(o["row"].get("score") or 0), o))
+            final.sort(key=lambda x: x[:3])
+            if not final:
+                st.info("Code + AI දෙකම පාස් වුණ coin එකක් නැහැ. Sliders ලිහිල් කරන්න, නැත්නම් REJECT ඒවාත් පෙන්නන්න.")
+            else:
+                st.dataframe(pd.DataFrame([{
+                    "Coin": o["coin"], "Dir": o["dir"], "Final": icon.get(str(o.get("verdict")).upper(), o.get("verdict")),
+                    "AI confidence": o.get("confidence"), "Code score": o["row"].get("score"),
+                    "Code checks": f"{sum(ok for _, ok in o['sanity'])}/{len(o['sanity'])}",
+                    "Entry": fmt(o["row"]["entry"]), "Stop": fmt(o["row"]["stop"]),
+                    "TP1": fmt(o["row"]["tp1"]), "TP2": fmt(o["row"]["tp2"]),
+                    "AI": o.get("provider"), "AI summary": o.get("summary")} for *_, o in final]), hide_index=True)
+
+            with st.expander("AI results (සියල්ල) සහ විස්තර"):
+                st.dataframe(pd.DataFrame([{
+                    "Coin": o["coin"], "Dir": o["dir"],
+                    "AI verdict": icon.get(str(o.get("verdict")).upper(), o.get("verdict")),
+                    "Confidence": o.get("confidence"), "AI": o.get("provider"),
+                    "Code checks": f"{sum(ok for _, ok in o['sanity'])}/{len(o['sanity'])}",
+                    "Summary": o.get("summary")} for o in ai_out]), hide_index=True)
+                for o in ai_out:
+                    st.markdown(f"**{o['coin']} {o['dir']}**")
                     for name, ok in o["sanity"]:
                         st.write(("✅ " if ok else "❌ ") + name)
-                    if o.get("checks"):
-                        st.write("**AI checks**")
-                        for c in o["checks"]:
-                            st.write(("✅ " if c.get("ok") else "❌ ") + f"{c.get('rule')}: {c.get('note')}")
+                    for c in o.get("checks") or []:
+                        st.write(("✅ " if c.get("ok") else "❌ ") + f"{c.get('rule')}: {c.get('note')}")
                     if o.get("risks"):
-                        st.write("**Risks**: " + "; ".join(map(str, o["risks"])))
+                        st.write("Risks: " + "; ".join(map(str, o["risks"])))
                     if o.get("errors"):
                         st.caption("Provider notes: " + " | ".join(o["errors"]))
-            st.caption("AI එකට පේන්නේ scanner දත්ත විතරයි, chart එක නෙවෙයි. එයාට වැරදිය හැකියි. Verdict එක තනි තීරණයක් විදිහට පාවිච්චි කරන්න එපා.")
+            st.caption("AI එකට පේන්නේ scanner දත්ත විතරයි, chart එක නෙවෙයි. එයාට වැරදිය හැකියි. Final list එක candidates ලැයිස්තුවක්, trade advice නෙවෙයි.")
 else:
     st.info("**Scan now** එබුවාම ලැයිස්තුව එනවා.")
 
